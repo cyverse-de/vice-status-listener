@@ -61,9 +61,8 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: metadata.namespace
-        ports:
-          - name: listen-port
-            containerPort: 60000
+          - name: CLUSTER
+            value: "1"
         volumeMounts:
           - name: localtime
             mountPath: /etc/localtime
