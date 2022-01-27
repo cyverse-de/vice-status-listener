@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vice-status-listener
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      de-app: vice-status-listener
+  template:
+    metadata:
+      labels:
+        de-app: vice-status-listener
+        app: de
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: de-app
+                operator: In
+                values:
+                - vice-status-listener
+            topologyKey: kubernetes.io/hostname
+      restartPolicy: Always
+      volumes:
+        - name: localtime
+          hostPath:
+            path: /etc/localtime
+        - name: timezone
+          configMap:
+            name: timezone
+            items:
+              - key: timezone
+                path: timezone
+        - name: service-configs
+          secret:
+            secretName: service-configs
+            items:
+              - key: jobservices.yml
+                path: jobservices.yml
+      containers:
+      - name: vice-status-listener
+        image: harbor.cyverse.org/de/vice-status-listener
+        resources:
+          requests:
+            cpu: "1m"
+            memory: "128Mi"
+          limits:
+            cpu: "100m"
+            memory: "256Mi"
+        args:
+          - --log-level
+          - debug
+        ports:
+          - name: listen-port
+            containerPort: 60000
+        volumeMounts:
+          - name: localtime
+            mountPath: /etc/localtime
+            readOnly: true
+          - name: timezone
+            mountPath: /etc/timezone
+            subPath: timezone
+          - name: service-configs
+            mountPath: /etc/iplant/de
+            readOnly: true
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 60000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 60000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vice-status-listener
+spec:
+  selector:
+    de-app: vice-status-listener
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: listen-port
+          
