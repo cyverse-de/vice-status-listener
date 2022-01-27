@@ -3,22 +3,28 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 
+	"github.com/cyverse-de/configurate"
 	"github.com/cyverse-de/messaging"
 	"github.com/cyverse-de/vice-status-listener/logging"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"github.com/spf13/viper"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 var log = logging.Log.WithFields(logrus.Fields{"package": "main"})
@@ -127,124 +133,123 @@ type Internal struct {
 }
 
 // MonitorVICEEvents fires up a goroutine that forwards events from the cluster
-// to the status receiving service (probably job-status-listener).
+// to the status receiving service (probably job-status-listener). This function
+// blocks and does not return.
 func (i *Internal) MonitorVICEEvents() {
-	go func(clientset kubernetes.Interface) {
-		for {
-			log.Debug("beginning to monitor k8s events")
-			set := labels.Set(map[string]string{
-				"app-type": "interactive",
-			})
-			factory := informers.NewSharedInformerFactoryWithOptions(
-				clientset,
-				0,
-				informers.WithNamespace(i.ViceNamespace),
-				informers.WithTweakListOptions(func(listoptions *v1.ListOptions) {
-					listoptions.LabelSelector = set.AsSelector().String()
-				}),
-			)
+	for {
+		log.Debug("beginning to monitor k8s events")
+		set := labels.Set(map[string]string{
+			"app-type": "interactive",
+		})
+		factory := informers.NewSharedInformerFactoryWithOptions(
+			i.clientset,
+			0,
+			informers.WithNamespace(i.ViceNamespace),
+			informers.WithTweakListOptions(func(listoptions *v1.ListOptions) {
+				listoptions.LabelSelector = set.AsSelector().String()
+			}),
+		)
 
-			deploymentInformer := factory.Apps().V1().Deployments().Informer()
-			deploymentInformerStop := make(chan struct{})
-			// no-op, defer doesn't work in infinite loop
-			// defer close(deploymentInformerStop)
+		deploymentInformer := factory.Apps().V1().Deployments().Informer()
+		deploymentInformerStop := make(chan struct{})
+		// no-op, defer doesn't work in infinite loop
+		// defer close(deploymentInformerStop)
 
-			deploymentInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-				AddFunc: func(obj interface{}) {
-					log.Debug("add a deployment")
-					var err error
+		deploymentInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				log.Debug("add a deployment")
+				var err error
 
-					depObj, ok := obj.(v1.Object)
-					if !ok {
-						log.Error(errors.New("unexpected type deployment object"))
-						return
-					}
+				depObj, ok := obj.(v1.Object)
+				if !ok {
+					log.Error(errors.New("unexpected type deployment object"))
+					return
+				}
 
-					labels := depObj.GetLabels()
+				labels := depObj.GetLabels()
 
-					jobID, ok := labels["external-id"]
-					if !ok {
-						log.Error(errors.New("deployment is missing external-id label"))
-						return
-					}
+				jobID, ok := labels["external-id"]
+				if !ok {
+					log.Error(errors.New("deployment is missing external-id label"))
+					return
+				}
 
-					log.Infof("processing deployment addition for job %s", jobID)
+				log.Infof("processing deployment addition for job %s", jobID)
 
-					analysisName, ok := labels["analysis-name"]
-					if !ok {
-						log.Error(errors.New("deployment is missing analysis-name label"))
-						return
-					}
+				analysisName, ok := labels["analysis-name"]
+				if !ok {
+					log.Error(errors.New("deployment is missing analysis-name label"))
+					return
+				}
 
-					if err = i.statusPublisher.Running(
-						jobID,
-						fmt.Sprintf("deployment %s has started for analysis %s", depObj.GetName(), analysisName),
-					); err != nil {
-						log.Error(err)
-					}
-				},
+				if err = i.statusPublisher.Running(
+					jobID,
+					fmt.Sprintf("deployment %s has started for analysis %s", depObj.GetName(), analysisName),
+				); err != nil {
+					log.Error(err)
+				}
+			},
 
-				DeleteFunc: func(obj interface{}) {
-					log.Debug("delete a deployment")
-					var err error
+			DeleteFunc: func(obj interface{}) {
+				log.Debug("delete a deployment")
+				var err error
 
-					depObj, ok := obj.(v1.Object)
-					if !ok {
-						log.Error(errors.New("unexpected type deployment object"))
-						return
-					}
+				depObj, ok := obj.(v1.Object)
+				if !ok {
+					log.Error(errors.New("unexpected type deployment object"))
+					return
+				}
 
-					labels := depObj.GetLabels()
+				labels := depObj.GetLabels()
 
-					jobID, ok := labels["external-id"]
-					if !ok {
-						log.Error(errors.New("deployment is missing external-id label"))
-						return
-					}
+				jobID, ok := labels["external-id"]
+				if !ok {
+					log.Error(errors.New("deployment is missing external-id label"))
+					return
+				}
 
-					log.Infof("processing deployment deletion for job %s", jobID)
+				log.Infof("processing deployment deletion for job %s", jobID)
 
-					analysisName, ok := labels["analysis-name"]
-					if !ok {
-						log.Error(errors.New("deployment is missing analysis-name label"))
-						return
-					}
+				analysisName, ok := labels["analysis-name"]
+				if !ok {
+					log.Error(errors.New("deployment is missing analysis-name label"))
+					return
+				}
 
-					if err = i.statusPublisher.Success(
-						jobID,
-						fmt.Sprintf("deployment %s has been deleted for analysis %s", depObj.GetName(), analysisName),
-					); err != nil {
-						log.Error(err)
-					}
-				},
+				if err = i.statusPublisher.Success(
+					jobID,
+					fmt.Sprintf("deployment %s has been deleted for analysis %s", depObj.GetName(), analysisName),
+				); err != nil {
+					log.Error(err)
+				}
+			},
 
-				UpdateFunc: func(oldObj, newObj interface{}) {
-					log.Debug("update a deployment")
-					var err error
+			UpdateFunc: func(oldObj, newObj interface{}) {
+				log.Debug("update a deployment")
+				var err error
 
-					depObj, ok := newObj.(*appsv1.Deployment)
-					if !ok {
-						log.Error(errors.New("unexpected type deployment object"))
-						return
-					}
+				depObj, ok := newObj.(*appsv1.Deployment)
+				if !ok {
+					log.Error(errors.New("unexpected type deployment object"))
+					return
+				}
 
-					jobID, ok := depObj.Labels["external-id"]
-					if !ok {
-						log.Error(errors.New("deployment is missing external-id label"))
-						return
-					}
+				jobID, ok := depObj.Labels["external-id"]
+				if !ok {
+					log.Error(errors.New("deployment is missing external-id label"))
+					return
+				}
 
-					log.Infof("processing deployment change for job %s", jobID)
+				log.Infof("processing deployment change for job %s", jobID)
 
-					if err = i.eventDeploymentModified(depObj, jobID); err != nil {
-						log.Error(err)
-					}
-				},
-			})
+				if err = i.eventDeploymentModified(depObj, jobID); err != nil {
+					log.Error(err)
+				}
+			},
+		})
 
-			deploymentInformer.Run(deploymentInformerStop)
-		}
-	}(i.clientset)
+		deploymentInformer.Run(deploymentInformerStop)
+	}
 }
 
 // eventDeploymentModified handles emitting job status updates when the pod for the
@@ -285,5 +290,94 @@ func hostname() string {
 }
 
 func main() {
+	var (
+		err        error
+		kubeconfig *string
+		cfg        *viper.Viper
 
+		configPath    = flag.String("config", "/etc/iplant/de/jobservices.yml", "Full path to the configuration file")
+		namespace     = flag.String("namespace", "default", "The namespace scope this process operates on for non-VICE calls")
+		viceNamespace = flag.String("vice-namespace", "vice-apps", "The namepsace that VICE apps are launched within")
+		listenPort    = flag.Int("port", 60000, "The port the service listens on for requests")
+		logLevel      = flag.String("log-level", "info", "One of trace, debug, info, warn, error, fatal, or panic.")
+	)
+
+	// if cluster is set, then
+	if cluster := os.Getenv("CLUSTER"); cluster != "" {
+		kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
+	} else {
+		// If the home directory exists, then assume that the kube config will be read
+		// from ~/.kube/config.
+		if home := os.Getenv("HOME"); home != "" {
+			kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
+		} else {
+			// If the home directory doesn't exist, then allow the user to specify a path.
+			kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
+		}
+	}
+
+	flag.Parse()
+	logging.SetupLogging(*logLevel)
+
+	log.Infof("config path is %s", *configPath)
+
+	cfg, err = configurate.Init(*configPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Infof("done reading configuration from %s", *configPath)
+
+	// Print error and exit if *kubeconfig is not empty and doesn't actually
+	// exist. If *kubeconfig is blank, then the app may be running inside the
+	// cluster, so let things proceed.
+	if *kubeconfig != "" {
+		_, err = os.Stat(*kubeconfig)
+		if err != nil {
+			if os.IsNotExist(err) {
+				log.Fatalf("config %s does not exist", *kubeconfig)
+			}
+			log.Fatal(errors.Wrapf(err, "error stat'ing the kubeconfig %s", *kubeconfig))
+		}
+	}
+
+	log.Printf("namespace is set to %s\n", *namespace)
+	log.Printf("listen port is set to %d\n", *listenPort)
+	log.Printf("kubeconfig is set to '%s', and may be blank", *kubeconfig)
+
+	var config *rest.Config
+	if *kubeconfig != "" {
+		config, err = clientcmd.BuildConfigFromFlags("", *kubeconfig)
+		if err != nil {
+			log.Fatal(errors.Wrapf(err, "error building config from flags using kubeconfig %s", *kubeconfig))
+		}
+	} else {
+		// If the home directory doesn't exist and the user doesn't specify a path,
+		// then assume that we're running inside a cluster.
+		config, err = rest.InClusterConfig()
+		if err != nil {
+			log.Fatal(errors.Wrapf(err, "error loading the config inside the cluster"))
+		}
+	}
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		log.Fatal(errors.Wrap(err, "error creating clientset from config"))
+	}
+
+	jobStatusURL := cfg.GetString("vice.job-status.base")
+	if jobStatusURL == "" {
+		jobStatusURL = "http://job-status-listener"
+	}
+
+	jsl := &JSLPublisher{
+		statusURL: jobStatusURL,
+	}
+
+	internal := &Internal{
+		statusPublisher: jsl,
+		clientset:       clientset,
+		ViceNamespace:   *viceNamespace,
+	}
+
+	internal.MonitorVICEEvents()
 }
