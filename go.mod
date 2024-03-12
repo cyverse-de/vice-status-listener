@@ -1,6 +1,6 @@
 module github.com/cyverse-de/vice-status-listener
 
-go 1.17
+go 1.21
 
 require (
 	github.com/cyverse-de/configurate v0.0.0-20220113221928-13d34aae3f0f
